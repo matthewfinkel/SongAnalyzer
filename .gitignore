@@ -1,0 +1,8 @@
+.venv
+.claude
+.DS_store
+__pycache__/
+NewSongs/*
+!NewSongs/.gitkeep
+AnalyzedSongs/*
+!AnalyzedSongs/.gitkeep
