@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Audio similarity tool — analyze songs and find the closest matches."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ import numpy as np
 
 from analyzer import extract_features, weighted_similarity, WEIGHTS, VECTOR_DIM
 from database import SongDatabase
+from genre_lookup import fetch_genres, blend_with_genre
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".opus"}
 DEFAULT_DB = str(Path.home() / ".audio_analyzer.db")
@@ -26,19 +28,29 @@ DEFAULT_DB = str(Path.home() / ".audio_analyzer.db")
     show_default=True,
     help="Path to the SQLite database file.",
 )
+@click.option(
+    "--acoustid-key",
+    default=lambda: os.environ.get("ACOUSTID_API_KEY", ""),
+    show_default=False,
+    help="Acoustid API key for genre lookup (or set ACOUSTID_API_KEY env var).",
+)
 @click.pass_context
-def cli(ctx, db):
+def cli(ctx, db, acoustid_key):
     """Analyze audio tracks and find similar songs by weighted feature comparison.
 
     \b
-    Feature weights:
-      Mood        35%
-      Genre       30%
-      Instruments 25%
-      Chords      10%
+    Feature weights (acoustic):
+      Mood        30%
+      Harmonic    35%
+      Genre/Style 25%
+      Instruments 10%
+
+    Genre tags (via Acoustid) apply a ±20% modifier on top.
+    Set ACOUSTID_API_KEY to enable genre detection.
     """
     ctx.ensure_object(dict)
     ctx.obj["db"] = SongDatabase(db)
+    ctx.obj["acoustid_key"] = acoustid_key
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +97,11 @@ def add(ctx, path):
         try:
             vec = extract_features(abs_path)
 
+            api_key = ctx.obj.get("acoustid_key", "")
+            genres = fetch_genres(abs_path, api_key) if api_key else []
+            genre_str = f" [{', '.join(genres)}]" if genres else " [genres: unknown]"
+
             if already_in_dest:
-                # File is already in AnalyzedSongs — just register it as-is
                 final_path = abs_path
             else:
                 dest = dest_dir / f.name
@@ -95,8 +110,8 @@ def add(ctx, path):
                 f.rename(dest)
                 final_path = str(dest.resolve())
 
-            db.add(final_path, f.stem, vec)
-            click.echo("ok")
+            db.add(final_path, f.stem, vec, genres)
+            click.echo(f"ok{genre_str}")
             added += 1
         except Exception as exc:
             click.echo(f"FAILED ({exc})")
@@ -133,32 +148,43 @@ def find(ctx, path, results):
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
-    songs = db.get_all()
+    api_key = ctx.obj.get("acoustid_key", "")
     query_abs = str(p.resolve())
+    query_genres = fetch_genres(query_abs, api_key) if api_key else []
+    if api_key:
+        if query_genres:
+            click.echo(f"  Detected genres: {', '.join(query_genres)}")
+        else:
+            click.echo("  Genres: not found in database (acoustic match only)")
+
+    songs = db.get_all()
 
     matches = []
-    for _, file_path, title, vec in songs:
+    for _, file_path, title, vec, genres in songs:
         if file_path == query_abs:
-            continue  # don't match against itself
+            continue
         if len(vec) != VECTOR_DIM:
             click.echo(f"  (skipping '{title}' — old vector format, re-add to update)")
             continue
-        sim = weighted_similarity(query_vec, vec)
-        matches.append((sim, title, file_path))
+        acoustic = weighted_similarity(query_vec, vec)
+        blended  = blend_with_genre(acoustic, query_genres, genres)
+        matches.append((blended, acoustic, title, file_path, genres))
 
     if not matches:
         click.echo("No other songs in the database to compare against.")
         return
 
     matches.sort(reverse=True)
-    top = matches[: results]
+    top = matches[:results]
 
     click.echo(f"\nTop {len(top)} match(es) for '{p.stem}':\n")
-    for rank, (sim, title, file_path) in enumerate(top, 1):
+    for rank, (sim, acoustic, title, file_path, genres) in enumerate(top, 1):
         filled = int(sim * 20)
         bar = "█" * filled + "░" * (20 - filled)
+        genre_str = ", ".join(genres) if genres else "unknown"
         click.echo(f"  {rank}. {title}")
-        click.echo(f"     {bar} {sim:.1%} similarity")
+        click.echo(f"     {bar} {sim:.1%}  (acoustic {acoustic:.1%})")
+        click.echo(f"     Genres: {genre_str}")
         click.echo(f"     {file_path}")
         click.echo()
 
@@ -179,8 +205,10 @@ def list_songs(ctx):
         return
 
     click.echo(f"{len(songs)} song(s) in database:\n")
-    for id_, file_path, title, _ in songs:
+    for id_, file_path, title, _, genres in songs:
+        genre_str = ", ".join(genres) if genres else "unknown"
         click.echo(f"  {id_:>4}.  {title}")
+        click.echo(f"         Genres: {genre_str}")
         click.echo(f"         {file_path}")
 
 
@@ -242,6 +270,47 @@ def download(ctx, url):
     latest = downloads[0]
     click.echo(f"Saved to NewSongs/{latest.name}")
     click.echo("Run 'add NewSongs' to analyze and move it to the database.")
+
+
+# ---------------------------------------------------------------------------
+# keys
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option("--acoustid", "acoustid_key", default=None, help="Set the Acoustid API key.")
+@click.option("--show", is_flag=True, help="Print current key values.")
+def keys(acoustid_key, show):
+    """Manage API keys stored in the project .env file."""
+    env_file = Path(__file__).parent / ".env"
+
+    # Read existing entries
+    entries: dict[str, str] = {}
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            entries[k.strip()] = v.strip().strip('"').strip("'")
+
+    if show:
+        if not entries:
+            click.echo("No keys set. Run: python main.py keys --acoustid YOUR_KEY")
+        for k, v in entries.items():
+            masked = v[:4] + "*" * (len(v) - 4) if len(v) > 4 else "****"
+            click.echo(f"  {k} = {masked}")
+        return
+
+    if acoustid_key is not None:
+        entries["ACOUSTID_API_KEY"] = acoustid_key
+        lines = [f'{k}={v}' for k, v in entries.items()]
+        env_file.write_text("\n".join(lines) + "\n")
+        click.echo(f"Saved ACOUSTID_API_KEY to {env_file}")
+        return
+
+    click.echo("Usage:")
+    click.echo("  Set a key  : python main.py keys --acoustid YOUR_KEY")
+    click.echo("  Show keys  : python main.py keys --show")
 
 
 # ---------------------------------------------------------------------------

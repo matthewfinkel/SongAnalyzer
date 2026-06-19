@@ -1,6 +1,7 @@
 .venv
 .claude
 .DS_store
+.env
 __pycache__/
 NewSongs/*
 !NewSongs/.gitkeep

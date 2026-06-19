@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import numpy as np
 from pathlib import Path
@@ -20,30 +21,46 @@ class SongDatabase:
                     file_path   TEXT UNIQUE NOT NULL,
                     title       TEXT NOT NULL,
                     vector      BLOB NOT NULL,
+                    genres      TEXT NOT NULL DEFAULT '[]',
                     added_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # Migrate existing databases that predate the genres column
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(songs)").fetchall()]
+            if "genres" not in cols:
+                conn.execute("ALTER TABLE songs ADD COLUMN genres TEXT NOT NULL DEFAULT '[]'")
 
-    def add(self, file_path: str, title: str, vector: np.ndarray) -> bool:
+    def add(self, file_path: str, title: str, vector: np.ndarray,
+            genres: list[str] | None = None) -> bool:
         """Insert a song. Returns False if the path already exists."""
+        genres_json = json.dumps(genres or [])
         try:
             with self._conn() as conn:
                 conn.execute(
-                    "INSERT INTO songs (file_path, title, vector) VALUES (?, ?, ?)",
-                    (file_path, title, vector.astype(np.float32).tobytes()),
+                    "INSERT INTO songs (file_path, title, vector, genres) VALUES (?, ?, ?, ?)",
+                    (file_path, title, vector.astype(np.float32).tobytes(), genres_json),
                 )
             return True
         except sqlite3.IntegrityError:
             return False
 
-    def get_all(self) -> List[Tuple[int, str, str, np.ndarray]]:
-        """Return all rows as (id, file_path, title, vector)."""
+    def update_genres(self, file_path: str, genres: list[str]) -> bool:
+        """Update the genres for an existing song."""
+        with self._conn() as conn:
+            c = conn.execute(
+                "UPDATE songs SET genres = ? WHERE file_path = ?",
+                (json.dumps(genres), file_path),
+            )
+            return c.rowcount > 0
+
+    def get_all(self) -> List[Tuple[int, str, str, np.ndarray, list]]:
+        """Return all rows as (id, file_path, title, vector, genres)."""
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT id, file_path, title, vector FROM songs ORDER BY added_at"
+                "SELECT id, file_path, title, vector, genres FROM songs ORDER BY added_at"
             ).fetchall()
         return [
-            (r[0], r[1], r[2], np.frombuffer(r[3], dtype=np.float32))
+            (r[0], r[1], r[2], np.frombuffer(r[3], dtype=np.float32), json.loads(r[4]))
             for r in rows
         ]
 
