@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Initialize the database (creates tables + seeds genre tags if missing)
+PYTHON="$PROJECT_ROOT/.venv/bin/python"
+if [ -f "$PYTHON" ]; then
+    echo "Initializing database..."
+    "$PYTHON" "$PROJECT_ROOT/main.py" init-db || echo "  Warning: DB init failed (non-fatal — continuing)"
+else
+    echo "Warning: Python venv not found at $PROJECT_ROOT/.venv"
+    echo "         Run: python -m venv .venv && .venv/bin/pip install -r requirements.txt"
+fi
+
+cd "$PROJECT_ROOT/web"
+exec npm run dev

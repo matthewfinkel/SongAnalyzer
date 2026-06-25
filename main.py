@@ -9,7 +9,7 @@ from pathlib import Path
 import click
 import numpy as np
 
-from analyzer import extract_features, weighted_similarity, WEIGHTS, VECTOR_DIM
+from analyzer import extract_features, extract_bpm, weighted_similarity, WEIGHTS, VECTOR_DIM
 from database import SongDatabase
 from genre_lookup import fetch_genres, blend_with_genre
 
@@ -98,8 +98,10 @@ def add(ctx, path):
             vec = extract_features(abs_path)
 
             api_key = ctx.obj.get("acoustid_key", "")
-            genres = fetch_genres(abs_path, api_key) if api_key else []
+            genres = fetch_genres(abs_path, api_key, title=f.stem) if api_key else []
+            bpm = extract_bpm(abs_path)
             genre_str = f" [{', '.join(genres)}]" if genres else " [genres: unknown]"
+            bpm_str = f" {bpm} BPM" if bpm else ""
 
             if already_in_dest:
                 final_path = abs_path
@@ -110,8 +112,8 @@ def add(ctx, path):
                 f.rename(dest)
                 final_path = str(dest.resolve())
 
-            db.add(final_path, f.stem, vec, genres)
-            click.echo(f"ok{genre_str}")
+            db.add(final_path, f.stem, vec, genres, bpm)
+            click.echo(f"ok{bpm_str}{genre_str}")
             added += 1
         except Exception as exc:
             click.echo(f"FAILED ({exc})")
@@ -127,31 +129,45 @@ def add(ctx, path):
 @cli.command()
 @click.argument("path")
 @click.option("-n", "--results", default=5, show_default=True, help="How many matches to show.")
+@click.option("--json", "as_json", is_flag=True, default=False, hidden=True,
+              help="Emit results as JSON (used by the web server).")
 @click.pass_context
-def find(ctx, path, results):
+def find(ctx, path, results, as_json):
     """Find the most similar songs in the database to the given audio file."""
+    import json as _json
+
     db: SongDatabase = ctx.obj["db"]
 
     if db.count() == 0:
-        click.echo("Database is empty. Run 'add' first.")
+        if as_json:
+            click.echo(_json.dumps({"error": "Database is empty"}))
+        else:
+            click.echo("Database is empty. Run 'add' first.")
         return
 
     p = Path(path)
     if not p.exists():
-        click.echo(f"Error: '{path}' not found.", err=True)
+        if as_json:
+            click.echo(_json.dumps({"error": f"File not found: {path}"}))
+        else:
+            click.echo(f"Error: '{path}' not found.", err=True)
         sys.exit(1)
 
-    click.echo(f"Analyzing '{p.name}' ...")
+    if not as_json:
+        click.echo(f"Analyzing '{p.name}' ...")
     try:
         query_vec = extract_features(str(p.resolve()))
     except Exception as exc:
-        click.echo(f"Error: {exc}", err=True)
+        if as_json:
+            click.echo(_json.dumps({"error": str(exc)}))
+        else:
+            click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
     api_key = ctx.obj.get("acoustid_key", "")
     query_abs = str(p.resolve())
-    query_genres = fetch_genres(query_abs, api_key) if api_key else []
-    if api_key:
+    query_genres = fetch_genres(query_abs, api_key, title=p.stem) if api_key else []
+    if not as_json and api_key:
         if query_genres:
             click.echo(f"  Detected genres: {', '.join(query_genres)}")
         else:
@@ -160,29 +176,50 @@ def find(ctx, path, results):
     songs = db.get_all()
 
     matches = []
-    for _, file_path, title, vec, genres in songs:
+    for _, file_path, title, vec, genres, bpm in songs:
         if file_path == query_abs:
             continue
         if len(vec) != VECTOR_DIM:
-            click.echo(f"  (skipping '{title}' — old vector format, re-add to update)")
+            if not as_json:
+                click.echo(f"  (skipping '{title}' — old vector format, re-add to update)")
             continue
         acoustic = weighted_similarity(query_vec, vec)
         blended  = blend_with_genre(acoustic, query_genres, genres)
-        matches.append((blended, acoustic, title, file_path, genres))
-
-    if not matches:
-        click.echo("No other songs in the database to compare against.")
-        return
+        matches.append((blended, acoustic, title, file_path, genres, bpm, vec))
 
     matches.sort(reverse=True)
     top = matches[:results]
 
+    if as_json:
+        click.echo(_json.dumps({
+            "query_genres": query_genres,
+            "query_vector": query_vec.tolist(),
+            "results": [
+                {
+                    "title": title,
+                    "file_path": file_path,
+                    "similarity": round(sim, 4),
+                    "acoustic_similarity": round(acoustic, 4),
+                    "genres": genres,
+                    "bpm": bpm,
+                    "vector": vec.tolist(),
+                }
+                for sim, acoustic, title, file_path, genres, bpm, vec in top
+            ],
+        }))
+        return
+
+    if not top:
+        click.echo("No other songs in the database to compare against.")
+        return
+
     click.echo(f"\nTop {len(top)} match(es) for '{p.stem}':\n")
-    for rank, (sim, acoustic, title, file_path, genres) in enumerate(top, 1):
+    for rank, (sim, acoustic, title, file_path, genres, bpm, _vec) in enumerate(top, 1):
         filled = int(sim * 20)
         bar = "█" * filled + "░" * (20 - filled)
         genre_str = ", ".join(genres) if genres else "unknown"
-        click.echo(f"  {rank}. {title}")
+        bpm_str = f"  •  {bpm} BPM" if bpm else ""
+        click.echo(f"  {rank}. {title}{bpm_str}")
         click.echo(f"     {bar} {sim:.1%}  (acoustic {acoustic:.1%})")
         click.echo(f"     Genres: {genre_str}")
         click.echo(f"     {file_path}")
@@ -205,9 +242,10 @@ def list_songs(ctx):
         return
 
     click.echo(f"{len(songs)} song(s) in database:\n")
-    for id_, file_path, title, _, genres in songs:
+    for id_, file_path, title, _, genres, bpm in songs:
         genre_str = ", ".join(genres) if genres else "unknown"
-        click.echo(f"  {id_:>4}.  {title}")
+        bpm_str = f"  •  {bpm} BPM" if bpm else ""
+        click.echo(f"  {id_:>4}.  {title}{bpm_str}")
         click.echo(f"         Genres: {genre_str}")
         click.echo(f"         {file_path}")
 
@@ -311,6 +349,53 @@ def keys(acoustid_key, show):
     click.echo("Usage:")
     click.echo("  Set a key  : python main.py keys --acoustid YOUR_KEY")
     click.echo("  Show keys  : python main.py keys --show")
+
+
+# ---------------------------------------------------------------------------
+# backfill-bpm
+# ---------------------------------------------------------------------------
+
+@cli.command("backfill-bpm")
+@click.pass_context
+def backfill_bpm(ctx):
+    """Extract and store BPM for all songs that are missing it."""
+    db: SongDatabase = ctx.obj["db"]
+    rows = db.get_all_paths()
+    missing = [(path, bpm) for path, bpm in rows if bpm is None]
+
+    if not missing:
+        click.echo("All songs already have BPM data.")
+        return
+
+    click.echo(f"Extracting BPM for {len(missing)} song(s)…")
+    updated, failed = 0, 0
+    for file_path, _ in missing:
+        name = Path(file_path).name
+        click.echo(f"  {name} … ", nl=False)
+        bpm = extract_bpm(file_path)
+        if bpm is not None:
+            db.update_bpm(file_path, bpm)
+            click.echo(f"{bpm} BPM")
+            updated += 1
+        else:
+            click.echo("failed")
+            failed += 1
+
+    click.echo(f"\nDone — updated: {updated}  failed: {failed}")
+
+
+# ---------------------------------------------------------------------------
+# init-db
+# ---------------------------------------------------------------------------
+
+@cli.command("init-db")
+@click.pass_context
+def init_db(ctx):
+    """Initialize the database schema and seed genre tags (safe to run repeatedly)."""
+    db: SongDatabase = ctx.obj["db"]
+    tags = db.get_genre_tags()
+    click.echo(f"Database ready: {db.db_path}")
+    click.echo(f"Genre tags: {len(tags)} entries")
 
 
 # ---------------------------------------------------------------------------
