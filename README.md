@@ -61,7 +61,7 @@ Your prompt will show `(.venv)` when active. You need to activate once per termi
 ### 4. Install Node modules
 
 ```bash
-bin/install
+./bin/install
 ```
 
 This installs dependencies for the web server, the React client, and the shared `concurrently` runner.
@@ -92,7 +92,7 @@ The key is stored in `.env` at the project root (already gitignored).
 ### 7. Start the app
 
 ```bash
-bin/web
+./bin/web
 ```
 
 This initializes the database, then starts the Express API server (port 3001) and the Vite dev server (port 5173) concurrently. Open **http://localhost:5173** in your browser.
