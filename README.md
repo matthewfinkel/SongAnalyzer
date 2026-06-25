@@ -27,8 +27,7 @@ brew install python ffmpeg chromaprint yt-dlp
 ### 1. Clone and enter the project
 
 ```bash
-git clone <repo-url>
-cd AudioAnalyzer
+git clone https://github.com/matthewfinkel/SongAnalyzer
 ```
 
 ### 2. Create the Python virtual environment
