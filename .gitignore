@@ -7,3 +7,4 @@ NewSongs/*
 !NewSongs/.gitkeep
 AnalyzedSongs/*
 !AnalyzedSongs/.gitkeep
+node_modules/

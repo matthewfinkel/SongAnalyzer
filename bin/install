@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WEB_DIR="$PROJECT_ROOT/web"
+
+echo "Installing web dependencies..."
+echo ""
+
+echo "  [1/3] web (concurrently)"
+npm install --prefix "$WEB_DIR" --silent
+echo "        done"
+
+echo "  [2/3] web/server"
+npm install --prefix "$WEB_DIR/server" --silent
+echo "        done"
+
+echo "  [3/3] web/client"
+npm install --prefix "$WEB_DIR/client" --silent
+echo "        done"
+
+echo ""
+echo "All node modules installed. Run bin/web to start the app."

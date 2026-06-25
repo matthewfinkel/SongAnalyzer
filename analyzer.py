@@ -268,6 +268,43 @@ def extract_features(file_path: str) -> np.ndarray:
     return np.mean(vecs, axis=0).astype(np.float32)
 
 
+def extract_bpm(file_path: str) -> float | None:
+    """Return the estimated BPM for a track, or None on failure.
+
+    Primary: Essentia RhythmExtractor2013 (multifeature) — designed for this
+    task and far more accurate across genres than librosa beat_track.
+    Loads seconds 5–95 to skip silent intros.
+
+    Fallback: librosa median over 30-second windows (kept for edge cases
+    where essentia raises an exception on unusual audio formats).
+    """
+    try:
+        audio = es.MonoLoader(filename=file_path, sampleRate=44100,
+                              startTime=5.0, endTime=95.0)()
+        bpm, _, confidence, _, _ = es.RhythmExtractor2013(method="multifeature")(audio)
+        bpm = float(bpm)
+        if confidence > 0.0 and 40.0 <= bpm <= 250.0:
+            return round(bpm, 1)
+    except Exception:
+        pass
+
+    try:
+        y, sr = librosa.load(file_path, sr=22050, mono=True, duration=90)
+        seg = sr * 30
+        tempos = []
+        for start in range(0, len(y) - seg, seg):
+            t, _ = librosa.beat.beat_track(y=y[start: start + seg], sr=sr)
+            v = float(np.atleast_1d(t)[0])
+            if v > 0:
+                tempos.append(v)
+        if tempos:
+            return round(float(np.median(tempos)), 1)
+    except Exception:
+        pass
+
+    return None
+
+
 def weighted_similarity(v1: np.ndarray, v2: np.ndarray) -> float:
     """Weighted Euclidean distance converted to a similarity score in (0, 1].
 
