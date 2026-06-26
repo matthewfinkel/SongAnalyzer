@@ -56,7 +56,7 @@ _VOCAB_SET = set(GENRE_VOCAB)
 # Raw MusicBrainz tag strings → canonical GENRE_VOCAB entry.
 # Keys are lower-cased. Longer/more-specific keys take priority (matched longest-first).
 _TAG_MAP: dict[str, str] = {
-    # --- Electronic subgenres (most important to get right) ---
+    # --- Electronic subgenres ---
     "house music":            "house",
     "deep house":             "house",
     "progressive house":      "house",

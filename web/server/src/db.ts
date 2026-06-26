@@ -10,6 +10,8 @@ export interface SongRow {
   id: number;
   file_path: string;
   title: string;
+  artist: string;
+  source_url: string | null;
   genres: string[];
   bpm: number | null;
   added_at: string;
@@ -36,6 +38,8 @@ function rowsToSongs(
       id: obj.id as number,
       file_path: obj.file_path as string,
       title: obj.title as string,
+      artist: (obj.artist as string) ?? "",
+      source_url: (obj.source_url as string | null) ?? null,
       genres,
       bpm: (obj.bpm as number | null) ?? null,
       added_at: obj.added_at as string,
@@ -57,7 +61,7 @@ export async function getAllSongs(): Promise<SongRow[]> {
   const db = await openDb();
   try {
     const [result] = db.exec(
-      "SELECT id, file_path, title, genres, bpm, added_at FROM songs ORDER BY added_at DESC"
+      "SELECT id, file_path, title, artist, source_url, genres, bpm, added_at FROM songs ORDER BY added_at DESC"
     );
     return result ? rowsToSongs(result) : [];
   } finally {
@@ -69,7 +73,7 @@ export async function getSongById(id: number): Promise<SongRow | null> {
   const db = await openDb();
   try {
     const stmt = db.prepare(
-      "SELECT id, file_path, title, genres, bpm, added_at, vector FROM songs WHERE id = ?"
+      "SELECT id, file_path, title, artist, source_url, genres, bpm, added_at, vector FROM songs WHERE id = ?"
     );
     stmt.bind([id]);
     if (!stmt.step()) return null;
@@ -90,6 +94,8 @@ export async function getSongById(id: number): Promise<SongRow | null> {
       id: row.id as number,
       file_path: row.file_path as string,
       title: row.title as string,
+      artist: (row.artist as string) ?? "",
+      source_url: (row.source_url as string | null) ?? null,
       genres,
       bpm: (row.bpm as number | null) ?? null,
       added_at: row.added_at as string,
@@ -168,7 +174,7 @@ export async function searchSongs(query: string): Promise<SongRow[]> {
   const db = await openDb();
   try {
     const stmt = db.prepare(
-      "SELECT id, file_path, title, genres, added_at FROM songs WHERE title LIKE ? ORDER BY added_at DESC"
+      "SELECT id, file_path, title, artist, source_url, genres, bpm, added_at FROM songs WHERE title LIKE ? ORDER BY added_at DESC"
     );
     stmt.bind([`%${query}%`]);
     const rows: SongRow[] = [];
@@ -178,6 +184,8 @@ export async function searchSongs(query: string): Promise<SongRow[]> {
         id: row.id as number,
         file_path: row.file_path as string,
         title: row.title as string,
+        artist: (row.artist as string) ?? "",
+        source_url: (row.source_url as string | null) ?? null,
         genres: JSON.parse((row.genres as string) ?? "[]"),
         bpm: (row.bpm as number | null) ?? null,
         added_at: row.added_at as string,

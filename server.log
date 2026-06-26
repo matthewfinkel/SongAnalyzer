@@ -1,0 +1,4 @@
+[2026-06-26T22:18:29.639Z] [playlist:gjlevoxz] fetching videos for https://www.youtube.com/watch?v=dQw4w9WgXcQ
+[2026-06-26T22:18:32.437Z] [playlist:gjlevoxz] got 1 videos, cancelled=false, completed=false
+[2026-06-26T22:18:32.438Z] [playlist:gjlevoxz] sent playlist event, spawning python
+[2026-06-26T22:18:33.159Z] [playlist:gjlevoxz] res.close fired, completed=true

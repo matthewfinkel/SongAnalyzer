@@ -42,9 +42,9 @@ export default function App() {
       </header>
 
       <main className="max-w-4xl mx-auto px-6 py-8">
-        {tab === "library" && <Library />}
-        {tab === "add" && <AddSong />}
-        {tab === "find" && <FindSimilar />}
+        <div className={tab === "library" ? undefined : "hidden"}><Library /></div>
+        <div className={tab === "add" ? undefined : "hidden"}><AddSong /></div>
+        <div className={tab === "find" ? undefined : "hidden"}><FindSimilar /></div>
       </main>
     </div>
   );

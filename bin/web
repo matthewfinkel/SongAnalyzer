@@ -1,18 +1,56 @@
 #!/usr/bin/env bash
+# Start the AudioAnalyzer web stack (server + client) and shut both down on Ctrl-C.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PYTHON="$ROOT/.venv/bin/python"
 
-# Initialize the database (creates tables + seeds genre tags if missing)
-PYTHON="$PROJECT_ROOT/.venv/bin/python"
+# --- database init ----------------------------------------------------------
 if [ -f "$PYTHON" ]; then
-    echo "Initializing database..."
-    "$PYTHON" "$PROJECT_ROOT/main.py" init-db || echo "  Warning: DB init failed (non-fatal — continuing)"
+    echo "Initializing database…"
+    "$PYTHON" "$ROOT/main.py" init-db 2>&1 || echo "  Warning: DB init failed (non-fatal)"
 else
-    echo "Warning: Python venv not found at $PROJECT_ROOT/.venv"
-    echo "         Run: python -m venv .venv && .venv/bin/pip install -r requirements.txt"
+    echo "Warning: Python venv not found at $ROOT/.venv"
+    echo "         Run: python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
 fi
 
-cd "$PROJECT_ROOT/web"
-exec npm run dev
+# --- start processes --------------------------------------------------------
+echo ""
+
+cd "$ROOT/web/server" && npm run dev &
+SERVER_PID=$!
+
+cd "$ROOT/web/client" && npm run dev &
+CLIENT_PID=$!
+
+echo "  Server  →  http://localhost:3001"
+echo "  Client  →  http://localhost:5173"
+echo ""
+echo "  Press Ctrl-C to stop everything."
+echo ""
+
+# --- signal handler ---------------------------------------------------------
+_cleanup() {
+    echo ""
+    echo "Shutting down…"
+
+    # Kill each process and all of its children
+    for pid in $SERVER_PID $CLIENT_PID; do
+        pkill -P "$pid" 2>/dev/null || true
+        kill "$pid"    2>/dev/null || true
+    done
+
+    # Belt-and-suspenders: kill anything still holding the ports
+    lsof -ti tcp:3001 | xargs kill -9 2>/dev/null || true
+    lsof -ti tcp:5173 | xargs kill -9 2>/dev/null || true
+
+    wait 2>/dev/null || true
+    echo "Done."
+    exit 0
+}
+
+trap _cleanup INT TERM
+
+# Wait — if either child dies unexpectedly, clean up and exit
+wait $SERVER_PID $CLIENT_PID

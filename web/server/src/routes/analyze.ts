@@ -1,9 +1,8 @@
 import { Router, Request, Response } from "express";
 import multer from "multer";
-import { spawn } from "child_process";
+import { spawn, execSync } from "child_process";
 import path from "path";
 import fs from "fs";
-import { getMaxSongId, deleteSongsAfter } from "../db.js";
 
 const router = Router();
 
@@ -11,6 +10,14 @@ const PROJECT_ROOT = path.resolve(__dirname, "../../../..");
 const PYTHON = path.join(PROJECT_ROOT, ".venv", "bin", "python");
 const MAIN_PY = path.join(PROJECT_ROOT, "main.py");
 const NEW_SONGS_DIR = path.join(PROJECT_ROOT, "NewSongs");
+
+// npm strips /opt/homebrew/bin from PATH when it builds the child environment.
+// Restore it so that yt-dlp (and other Homebrew tools) are findable by both
+// Node spawn calls and Python subprocess.run calls.
+const CHILD_ENV = {
+  ...process.env,
+  PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH ?? ""}`,
+};
 
 fs.mkdirSync(NEW_SONGS_DIR, { recursive: true });
 
@@ -30,14 +37,31 @@ const findStorage = multer.diskStorage({
 const uploadForAdd  = multer({ storage: addStorage });
 const uploadForFind = multer({ storage: findStorage });
 
-function runPython(args: string[]): Promise<{ stdout: string; stderr: string }> {
+function runPython(
+  args: string[],
+  opts: { timeoutMs?: number } = {}
+): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(PYTHON, [MAIN_PY, ...args], { cwd: PROJECT_ROOT });
+    const proc = spawn(PYTHON, [MAIN_PY, ...args], { cwd: PROJECT_ROOT, env: CHILD_ENV });
+    proc.on("error", reject);
     let stdout = "";
     let stderr = "";
-    proc.stdout.on("data", (d) => (stdout += d));
-    proc.stderr.on("data", (d) => (stderr += d));
+    proc.stdout.on("data", (d: Buffer) => (stdout += d));
+    proc.stderr.on("data", (d: Buffer) => {
+      stderr += d;
+      process.stderr.write(d); // mirror to server terminal in real-time
+    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (opts.timeoutMs) {
+      timer = setTimeout(() => {
+        proc.kill();
+        reject(new Error(`Python process timed out after ${opts.timeoutMs}ms`));
+      }, opts.timeoutMs);
+    }
+
     proc.on("close", (code) => {
+      if (timer) clearTimeout(timer);
       if (code === 0) resolve({ stdout, stderr });
       else reject(new Error(stderr || stdout || `exit code ${code}`));
     });
@@ -96,7 +120,7 @@ router.post("/find-from-url", async (req: Request, res: Response) => {
   const { url, n } = req.body as { url?: string; n?: number };
   if (!url) { res.status(400).json({ error: "url is required" }); return; }
   try {
-    const { stdout: dlOut } = await runPython(["download", url]);
+    const { stdout: dlOut } = await runPython(["download", url], { timeoutMs: 10 * 60 * 1000 });
     const match = dlOut.match(/Saved to NewSongs\/(.+)/);
     if (!match) { res.status(500).json({ error: "Could not parse downloaded filename" }); return; }
     const filePath = path.join(NEW_SONGS_DIR, match[1].trim());
@@ -116,11 +140,11 @@ router.post("/download", async (req: Request, res: Response) => {
   const { url } = req.body as { url?: string };
   if (!url) { res.status(400).json({ error: "url is required" }); return; }
   try {
-    const { stdout: dlOut } = await runPython(["download", url]);
+    const { stdout: dlOut } = await runPython(["download", url], { timeoutMs: 10 * 60 * 1000 });
     const match = dlOut.match(/Saved to NewSongs\/(.+)/);
     if (!match) { res.json({ message: dlOut.trim() }); return; }
     const filePath = path.join(NEW_SONGS_DIR, match[1].trim());
-    const { stdout: addOut } = await runPython(["add", filePath]);
+    const { stdout: addOut } = await runPython(["add", "--source-url", url, filePath]);
     res.json({ message: dlOut.trim() + "\n" + addOut.trim() });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -131,10 +155,33 @@ router.post("/download", async (req: Request, res: Response) => {
 // Playlist import (SSE streaming)
 // ---------------------------------------------------------------------------
 
-const playlistJobs = new Map<string, { cancelled: boolean }>();
+type ChildProcess = ReturnType<typeof spawn>;
+const playlistJobs = new Map<string, { cancelled: boolean; proc?: ChildProcess }>();
 
 function genJobId(): string {
   return Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * Recursively kill a process and all its descendants by walking the PID tree.
+ * Uses `pgrep -P` to find children by parent PID — this works regardless of
+ * process group membership, so yt-dlp and ffmpeg are always caught.
+ */
+function killTree(pid: number): void {
+  let children: number[] = [];
+  try {
+    const out = execSync(`pgrep -P ${pid}`, { stdio: ["ignore", "pipe", "ignore"] });
+    children = out.toString().trim().split(/\s+/).map(Number).filter((n) => n > 0);
+  } catch {
+    // pgrep exits non-zero when there are no children — that's fine
+  }
+  for (const child of children) killTree(child);
+  try { process.kill(pid, "SIGKILL"); } catch {}
+}
+
+function killGroup(proc: ChildProcess): void {
+  if (proc.pid == null) return;
+  killTree(proc.pid);
 }
 
 async function getPlaylistVideos(
@@ -147,7 +194,8 @@ async function getPlaylistVideos(
       "--no-warnings",
       "-j",
       playlistUrl,
-    ]);
+    ], { env: CHILD_ENV });
+    proc.on("error", (err) => { clearTimeout(timer); reject(err); });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -174,6 +222,20 @@ async function getPlaylistVideos(
   });
 }
 
+// GET /api/analyze/health — returns resolved paths for debugging
+router.get("/health", (_req: Request, res: Response) => {
+  const ytdlp = "/opt/homebrew/bin/yt-dlp";
+  res.json({
+    PROJECT_ROOT,
+    PYTHON,
+    MAIN_PY,
+    ytdlpExists: fs.existsSync(ytdlp),
+    pythonExists: fs.existsSync(PYTHON),
+    PATH: CHILD_ENV.PATH,
+  });
+});
+
+
 // POST /api/analyze/playlist — streams SSE while importing each song
 router.post("/playlist", async (req: Request, res: Response) => {
   const { url } = req.body as { url?: string };
@@ -184,83 +246,94 @@ router.post("/playlist", async (req: Request, res: Response) => {
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
+  // Disable Nagle's algorithm so each SSE event is sent immediately (no TCP buffering).
+  res.socket?.setNoDelay(true);
 
   const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
   const jobId = genJobId();
-  const job = { cancelled: false };
+  const job: { cancelled: boolean; proc?: ChildProcess } = { cancelled: false };
   playlistJobs.set(jobId, job);
   send({ type: "job", jobId });
 
-  const initialMaxId = await getMaxSongId();
   let completed = false;
 
-  const finish = async (cancelled: boolean) => {
+  const finish = (cancelled: boolean) => {
+    if (completed) return;
     completed = true;
     playlistJobs.delete(jobId);
-    if (cancelled) {
-      try {
-        const removed = await deleteSongsAfter(initialMaxId);
-        send({ type: "cancelled", removed });
-      } catch {
-        send({ type: "cancelled", removed: 0 });
-      }
-    }
+    if (cancelled) send({ type: "cancelled" });
     res.end();
   };
 
-  // Roll back silently if the client disconnects mid-import
-  req.on("close", async () => {
+  // Stop the Python process if the client disconnects mid-import.
+  // Already-added songs are kept.
+  // In Node.js >=16, req.on("close") fires when the request BODY is consumed,
+  // not when the client disconnects. Use res.on("close") instead — it fires
+  // only when the underlying socket is closed (i.e. the client went away).
+  res.on("close", () => {
     if (!completed) {
       job.cancelled = true;
+      if (job.proc) killGroup(job.proc);
       playlistJobs.delete(jobId);
-      try { await deleteSongsAfter(initialMaxId); } catch {}
+      completed = true;
     }
   });
 
   try {
     send({ type: "fetching" });
     const videos = await getPlaylistVideos(url);
-    send({ type: "playlist", videos });
 
-    let added = 0, skipped = 0, failed = 0;
+    // Cancel might have arrived while the playlist was being fetched.
+    if (job.cancelled) { finish(true); return; }
 
-    for (let i = 0; i < videos.length; i++) {
-      if (job.cancelled) { await finish(true); return; }
+    // Deduplicate in case the playlist lists the same video more than once.
+    const seen = new Set<string>();
+    const deduped = videos.filter((v) => { if (seen.has(v.id)) return false; seen.add(v.id); return true; });
+    send({ type: "playlist", videos: deduped });
+    const videoIds = deduped.map((v) => v.id);
+    const proc = spawn(PYTHON, [MAIN_PY, "import-playlist", "--", ...videoIds], {
+      cwd: PROJECT_ROOT,
+      env: CHILD_ENV,
+    });
+    job.proc = proc;
 
-      send({ type: "progress", index: i, step: "downloading" });
+    // Cancel might have arrived in the tiny gap between spawn and assignment.
+    if (job.cancelled) { killGroup(proc); finish(true); return; }
 
-      let filePath: string;
-      try {
-        const { stdout: dlOut } = await runPython(["download", `https://www.youtube.com/watch?v=${videos[i].id}`]);
-        const match = dlOut.match(/Saved to NewSongs\/(.+)/);
-        if (!match) throw new Error("Could not parse downloaded filename from yt-dlp output");
-        filePath = path.join(NEW_SONGS_DIR, match[1].trim());
-      } catch (e) {
-        send({ type: "result", index: i, status: "error", error: String(e) });
-        failed++;
-        continue;
+    // Mirror Python's stderr to the server terminal in real-time.
+    proc.stderr.on("data", (chunk: Buffer) => process.stderr.write(chunk));
+
+    let lineBuffer = "";
+
+    proc.stdout.on("data", (chunk: Buffer) => {
+      lineBuffer += chunk.toString();
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const event = JSON.parse(trimmed) as Record<string, unknown>;
+          if (job.cancelled) return;
+          send(event);
+          if (event.type === "complete") finish(false);
+        } catch {}
       }
+    });
 
-      if (job.cancelled) { await finish(true); return; }
-
-      send({ type: "progress", index: i, step: "analyzing" });
-      try {
-        const { stdout: addOut } = await runPython(["add", filePath]);
-        const wasSkipped = /\bskip\b/.test(addOut);
-        send({ type: "result", index: i, status: wasSkipped ? "skipped" : "added" });
-        if (wasSkipped) skipped++; else added++;
-      } catch (e) {
-        send({ type: "result", index: i, status: "error", error: String(e) });
-        failed++;
+    proc.on("close", (code) => {
+      if (job.cancelled) {
+        finish(true);
+      } else if (!completed) {
+        send({ type: "error", error: `Import process exited unexpectedly (code ${code})` });
+        finish(false);
       }
-    }
+    });
 
-    send({ type: "complete", added, skipped, failed });
-    await finish(false);
   } catch (e) {
     send({ type: "error", error: String(e) });
-    await finish(false);
+    finish(false);
   }
 });
 
@@ -270,6 +343,7 @@ router.post("/playlist/cancel", (req: Request, res: Response) => {
   const job = jobId ? playlistJobs.get(jobId) : undefined;
   if (job) {
     job.cancelled = true;
+    if (job.proc) killGroup(job.proc);
     res.json({ ok: true });
   } else {
     res.status(404).json({ error: "Job not found or already complete" });

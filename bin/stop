@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Force-kill everything the web stack might have left running.
+set -euo pipefail
+
+killed=0
+
+for port in 3001 5173; do
+    pids=$(lsof -ti tcp:$port 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "Killing port $port (PIDs: $pids)"
+        echo "$pids" | xargs kill -9 2>/dev/null || true
+        killed=1
+    fi
+done
+
+if [ $killed -eq 0 ]; then
+    echo "Nothing running on ports 3001 or 5173."
+fi

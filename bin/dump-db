@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Print every row and column from every table in the audio analyzer database."""
+
+import sqlite3
+import sys
+from pathlib import Path
+
+DB_PATH = Path.home() / ".audio_analyzer.db"
+
+if not DB_PATH.exists():
+    print(f"Database not found at {DB_PATH}", file=sys.stderr)
+    sys.exit(1)
+
+conn = sqlite3.connect(DB_PATH)
+conn.row_factory = sqlite3.Row
+
+tables = [
+    row[0]
+    for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    ).fetchall()
+]
+
+for table in tables:
+    rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+    cols = [d[0] for d in conn.execute(f"SELECT * FROM {table} LIMIT 0").description or []]
+
+    print(f"\n{'=' * 60}")
+    print(f"TABLE: {table}  ({len(rows)} rows)")
+    print(f"{'=' * 60}")
+
+    if not rows:
+        print("  (empty)")
+        continue
+
+    # Column widths: max of header and each cell value, capped at 40 chars
+    widths = [len(c) for c in cols]
+    for row in rows:
+        for i, val in enumerate(row):
+            widths[i] = min(40, max(widths[i], len(str(val) if val is not None else "NULL")))
+
+    header = "  ".join(c.ljust(widths[i]) for i, c in enumerate(cols))
+    sep    = "  ".join("-" * widths[i] for i in range(len(cols)))
+    print(header)
+    print(sep)
+
+    for row in rows:
+        cells = []
+        for i, val in enumerate(row):
+            text = str(val) if val is not None else "NULL"
+            if len(text) > 40:
+                text = text[:37] + "..."
+            cells.append(text.ljust(widths[i]))
+        print("  ".join(cells))
+
+conn.close()

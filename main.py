@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Audio similarity tool — analyze songs and find the closest matches."""
 
+import json
 import os
+import re
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import click
@@ -59,8 +63,9 @@ def cli(ctx, db, acoustid_key):
 
 @cli.command()
 @click.argument("path")
+@click.option("--source-url", default=None, help="URL this file was downloaded from.")
 @click.pass_context
-def add(ctx, path):
+def add(ctx, path, source_url):
     """Add a song or every audio file in a folder to the database."""
     db: SongDatabase = ctx.obj["db"]
     p = Path(path)
@@ -112,7 +117,7 @@ def add(ctx, path):
                 f.rename(dest)
                 final_path = str(dest.resolve())
 
-            db.add(final_path, f.stem, vec, genres, bpm)
+            db.add(final_path, f.stem, vec, genres, bpm, source_url=source_url)
             click.echo(f"ok{bpm_str}{genre_str}")
             added += 1
         except Exception as exc:
@@ -276,8 +281,16 @@ def remove(ctx, path):
 @click.pass_context
 def download(ctx, url):
     """Download a YouTube video as audio and save it to NewSongs."""
+    db: SongDatabase = ctx.obj["db"]
     new_songs_dir = Path("NewSongs")
     new_songs_dir.mkdir(exist_ok=True)
+
+    # Extract video ID for duplicate check (handles full URLs and short youtu.be links)
+    vid_match = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", url)
+    vid_id = vid_match.group(1) if vid_match else ""
+    if db.exists_by_url(url) or (vid_id and db.exists_by_video_id(vid_id)):
+        click.echo("Already in library, skipping download.")
+        sys.exit(0)
 
     click.echo(f"Downloading {url} ...")
 
@@ -299,7 +312,6 @@ def download(ctx, url):
         click.echo("Download failed:\n" + result.stderr, err=True)
         sys.exit(1)
 
-    # Find the file that was just written
     downloads = sorted(new_songs_dir.glob("*.mp3"), key=lambda f: f.stat().st_mtime, reverse=True)
     if not downloads:
         click.echo("Download appeared to succeed but no mp3 was found in NewSongs.", err=True)
@@ -308,6 +320,139 @@ def download(ctx, url):
     latest = downloads[0]
     click.echo(f"Saved to NewSongs/{latest.name}")
     click.echo("Run 'add NewSongs' to analyze and move it to the database.")
+
+
+# ---------------------------------------------------------------------------
+# import-playlist
+# ---------------------------------------------------------------------------
+
+@cli.command("import-playlist")
+@click.argument("video_ids", nargs=-1)
+@click.pass_context
+def import_playlist(ctx, video_ids):
+    """Download and analyze a list of YouTube video IDs using 3 parallel workers."""
+    db: SongDatabase = ctx.obj["db"]
+    acoustid_key = ctx.obj.get("acoustid_key", "")
+    new_songs_dir = Path("NewSongs")
+    new_songs_dir.mkdir(exist_ok=True)
+
+    # Preserve order but drop any duplicate video IDs — a playlist can list the
+    # same video more than once, and duplicates would race across workers.
+    video_ids = list(dict.fromkeys(video_ids))
+    total = len(video_ids)
+
+    # Split into up to 3 equal chunks
+    n_workers = min(3, total) if total > 0 else 0
+    chunk_size = (total + n_workers - 1) // n_workers if n_workers > 0 else 0
+    chunks = [video_ids[i : i + chunk_size] for i in range(0, total, chunk_size)]
+
+    # Each worker accumulates its own counters — no shared mutable state
+    results = [{"added": 0, "skipped": 0, "failed": 0} for _ in chunks]
+    # Serialize stdout writes so JSON lines are never interleaved across threads
+    _stdout_lock = threading.Lock()
+
+    def emit(data: dict):
+        with _stdout_lock:
+            print(json.dumps(data), flush=True)
+
+    def worker(chunk, result):
+        for vid_id in chunk:
+            url = f"https://www.youtube.com/watch?v={vid_id}"
+            print(f"[import] {vid_id}", file=sys.stderr, flush=True)
+            try:
+                by_url = db.exists_by_url(url)
+                by_vid = db.exists_by_video_id(vid_id)
+                print(f"[import] check {vid_id}: url={by_url} vid={by_vid}", file=sys.stderr, flush=True)
+                if by_url or by_vid:
+                    print(f"[import] already in db, skipping {vid_id}", file=sys.stderr, flush=True)
+                    emit({"type": "song_status", "id": vid_id, "status": "skipped"})
+                    result["skipped"] += 1
+                    continue
+
+                emit({"type": "song_status", "id": vid_id, "status": "downloading"})
+                dl = subprocess.run(
+                    [
+                        "yt-dlp",
+                        "--extract-audio",
+                        "--audio-format", "mp3",
+                        "--audio-quality", "0",
+                        "--output", str(new_songs_dir / "%(title)s [%(id)s].%(ext)s"),
+                        "--no-playlist",
+                        url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+
+                if dl.returncode != 0:
+                    print(f"[import] download failed for {vid_id}: {dl.stderr.strip()[:200]}", file=sys.stderr, flush=True)
+                    emit({"type": "song_status", "id": vid_id, "status": "failed"})
+                    result["failed"] += 1
+                    continue
+
+                # Find by video ID in filename — safe with concurrent downloads
+                matches = [f for f in new_songs_dir.glob("*.mp3") if f" [{vid_id}]" in f.stem]
+                if not matches:
+                    print(f"[import] no mp3 found for {vid_id}", file=sys.stderr, flush=True)
+                    emit({"type": "song_status", "id": vid_id, "status": "failed"})
+                    result["failed"] += 1
+                    continue
+
+                mp3 = matches[0]
+                stem = mp3.stem
+                title = stem[: -len(f" [{vid_id}]")] if stem.endswith(f" [{vid_id}]") else stem
+                artist = ""
+                abs_path = str(mp3.resolve())
+
+                # Secondary duplicate check: title+artist when artist is known,
+                # title-only otherwise (URL check above already handled the ideal case).
+                by_path  = db.exists(abs_path)
+                by_title = (not artist and db.exists_by_title(title))
+                by_ta    = (bool(artist) and db.exists_by_title_artist(title, artist))
+                print(
+                    f"[import] post-dl check {vid_id} ({title!r}): "
+                    f"path={by_path} title={by_title} title+artist={by_ta}",
+                    file=sys.stderr, flush=True,
+                )
+                is_dup = by_path or by_ta or by_title
+                if is_dup:
+                    mp3.unlink(missing_ok=True)  # remove the just-downloaded file
+                    emit({"type": "song_status", "id": vid_id, "status": "skipped"})
+                    result["skipped"] += 1
+                    continue
+
+                print(f"[import] analyzing: {title}", file=sys.stderr, flush=True)
+                emit({"type": "song_status", "id": vid_id, "status": "analyzing"})
+                vec = extract_features(abs_path)
+                genres = fetch_genres(abs_path, acoustid_key, title=title) if acoustid_key else []
+                bpm = extract_bpm(abs_path)
+
+                dest_dir = mp3.parent.parent / "AnalyzedSongs"
+                dest_dir.mkdir(exist_ok=True)
+                dest = dest_dir / mp3.name
+                if dest.exists():
+                    dest = dest_dir / f"{mp3.stem}__{vid_id}{mp3.suffix}"
+                mp3.rename(dest)
+
+                db.add(str(dest.resolve()), title, vec, genres, bpm, artist="", source_url=url)
+                print(f"[import] added: {title}", file=sys.stderr, flush=True)
+                emit({"type": "song_status", "id": vid_id, "status": "added"})
+                result["added"] += 1
+
+            except Exception as exc:
+                print(f"[import] error for {vid_id}: {exc}", file=sys.stderr, flush=True)
+                emit({"type": "song_status", "id": vid_id, "status": "failed"})
+
+    threads = [threading.Thread(target=worker, args=(chunk, results[i])) for i, chunk in enumerate(chunks)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    added   = sum(r["added"]   for r in results)
+    skipped = sum(r["skipped"] for r in results)
+    failed  = sum(r["failed"]  for r in results)
+    print(json.dumps({"type": "complete", "added": added, "skipped": skipped, "failed": failed}), flush=True)
 
 
 # ---------------------------------------------------------------------------

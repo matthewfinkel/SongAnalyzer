@@ -2,6 +2,8 @@ export interface Song {
   id: number;
   file_path: string;
   title: string;
+  artist?: string;
+  source_url?: string | null;
   genres: string[];
   bpm: number | null;
   added_at: string;

@@ -33,24 +33,69 @@ class SongDatabase:
                 conn.execute("ALTER TABLE songs ADD COLUMN genres TEXT NOT NULL DEFAULT '[]'")
             if "bpm" not in cols:
                 conn.execute("ALTER TABLE songs ADD COLUMN bpm REAL")
+            if "artist" not in cols:
+                conn.execute("ALTER TABLE songs ADD COLUMN artist TEXT NOT NULL DEFAULT ''")
+            if "source_url" not in cols:
+                conn.execute("ALTER TABLE songs ADD COLUMN source_url TEXT")
 
             # Genre tag vocabulary — always sourced from the seed SQL file
             if _SEED_SQL.exists():
                 conn.executescript(_SEED_SQL.read_text())
 
     def add(self, file_path: str, title: str, vector: np.ndarray,
-            genres: list[str] | None = None, bpm: float | None = None) -> bool:
+            genres: list[str] | None = None, bpm: float | None = None,
+            artist: str = "", source_url: str | None = None) -> bool:
         """Insert a song. Returns False if the path already exists."""
         genres_json = json.dumps(genres or [])
         try:
             with self._conn() as conn:
                 conn.execute(
-                    "INSERT INTO songs (file_path, title, vector, genres, bpm) VALUES (?, ?, ?, ?, ?)",
-                    (file_path, title, vector.astype(np.float32).tobytes(), genres_json, bpm),
+                    "INSERT INTO songs (file_path, title, vector, genres, bpm, artist, source_url)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (file_path, title, vector.astype(np.float32).tobytes(),
+                     genres_json, bpm, artist, source_url),
                 )
             return True
         except sqlite3.IntegrityError:
             return False
+
+    def exists_by_url(self, source_url: str) -> bool:
+        """Return True if any song was imported from this URL."""
+        if not source_url:
+            return False
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT 1 FROM songs WHERE source_url = ? LIMIT 1", (source_url,)
+            ).fetchone() is not None
+
+    def exists_by_video_id(self, video_id: str) -> bool:
+        """Return True if any song's source_url contains this YouTube video ID."""
+        if not video_id:
+            return False
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT 1 FROM songs WHERE source_url LIKE ? LIMIT 1",
+                (f"%{video_id}%",)
+            ).fetchone() is not None
+
+    def exists_by_title_artist(self, title: str, artist: str) -> bool:
+        """Return True if a song with this exact title+artist is already stored."""
+        if not title or not artist:
+            return False
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT 1 FROM songs WHERE lower(title) = lower(?) AND lower(artist) = lower(?) LIMIT 1",
+                (title, artist),
+            ).fetchone() is not None
+
+    def exists_by_title(self, title: str) -> bool:
+        """Return True if any song with this exact title is already stored."""
+        if not title:
+            return False
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT 1 FROM songs WHERE lower(title) = lower(?) LIMIT 1", (title,)
+            ).fetchone() is not None
 
     def get_genre_tags(self) -> List[str]:
         """Return all canonical genre tag names in alphabetical order."""
