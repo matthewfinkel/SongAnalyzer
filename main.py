@@ -341,8 +341,20 @@ def import_playlist(ctx, video_ids):
     video_ids = list(dict.fromkeys(video_ids))
     total = len(video_ids)
 
-    # Split into up to 3 equal chunks
-    n_workers = min(3, total) if total > 0 else 0
+    # Scale workers with playlist size, capped by total songs available
+    if total >= 101:
+        n_workers = 6
+    elif total >= 51:
+        n_workers = 5
+    elif total >= 21:
+        n_workers = 4
+    elif total >= 11:
+        n_workers = 3
+    elif total >= 1:
+        n_workers = 2
+    else:
+        n_workers = 0
+    n_workers = min(n_workers, total)
     chunk_size = (total + n_workers - 1) // n_workers if n_workers > 0 else 0
     chunks = [video_ids[i : i + chunk_size] for i in range(0, total, chunk_size)]
 

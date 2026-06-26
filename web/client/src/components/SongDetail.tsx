@@ -235,8 +235,8 @@ export default function SongDetail({ songId, onClose, onDelete }: Props) {
   );
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
-      <div className="bg-gray-900 rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto shadow-2xl">
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div className="bg-gray-900 rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className="sticky top-0 bg-gray-900 border-b border-gray-700 flex items-center justify-between px-6 py-4 rounded-t-2xl gap-4">
           <h2 className="text-lg font-semibold text-white truncate">
@@ -391,7 +391,13 @@ export default function SongDetail({ songId, onClose, onDelete }: Props) {
                 </div>
                 <div className="col-span-2">
                   <div className="text-gray-400 text-xs uppercase tracking-wide mb-1">File</div>
-                  <div className="text-gray-400 text-xs font-mono truncate">{song.file_path}</div>
+                  <div className="text-gray-400 text-xs font-mono truncate">{
+                    (() => {
+                      const marker = "AudioAnalyzer/";
+                      const idx = song.file_path.indexOf(marker);
+                      return idx !== -1 ? song.file_path.slice(idx) : song.file_path;
+                    })()
+                  }</div>
                 </div>
                 {song.source_url && (
                   <div className="col-span-2">

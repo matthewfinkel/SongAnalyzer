@@ -51,10 +51,10 @@ export default function ComparisonModal({
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <div className="bg-gray-900 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div className="bg-gray-900 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
         {/* Header */}
-        <div className="sticky top-0 bg-gray-900 border-b border-gray-700 px-6 py-4 rounded-t-2xl flex items-start justify-between gap-4">
+        <div className="sticky top-0 z-10 bg-gray-900 border-b border-gray-700 px-6 py-4 rounded-t-2xl flex items-start justify-between gap-4">
           <div>
             <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">
               Similarity breakdown
